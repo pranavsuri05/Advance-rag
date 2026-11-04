@@ -87,13 +87,7 @@ An optional `evaluation_judging` call exists for the LLM judge in the evaluation
 
 **The LLM is not responsible for retrieval.** These are separate, local components: embeddings (`all-MiniLM-L6-v2`), **FAISS vector retrieval**, **BM25 keyword retrieval**, **Reciprocal Rank Fusion (RRF)** and **cross-encoder reranking**. Document chunking, citation validation (deterministic code that checks every citation against the chunks actually retrieved) and session storage are also plain code.
 
-### Model configuration and reproducibility
-Configuration example (placeholder value only):
-```
-LLM_PROVIDER=groq
-GROQ_MODEL=qwen/qwen3.8-27b
-GROQ_API_KEY=your_groq_api_key_here
-```
+
 - The API key is supplied **only through environment variables**; the code reads configuration with `os.getenv` (plus `python-dotenv` for a local, git-ignored `.env` file) and never reads secrets from committed files.
 - **Local development:** copy `.env.example` to `.env` and fill in the key. `.env` is git-ignored.
 - **Streamlit Community Cloud:** enter the same values in the app's **Secrets** settings as top-level keys (`GROQ_API_KEY = "…"`). Streamlit exposes top-level secrets as environment variables, which is how this app reads them. See *Deployment*.
