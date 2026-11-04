@@ -52,6 +52,70 @@ flowchart TD
 8. **Citation validation** – every `[Source: file, Chunk: id]` is checked against the chunks actually supplied. Unknown ids are removed (and reported); wrong filenames/pages are repaired; an un-cited non-abstaining answer is flagged. PDF page numbers are included when available.
 9. **Memory** – user and assistant messages (with sources and pipeline metadata) are persisted.
 
+## LLM Provider and Model Selection
+The assignment asks for a hosted LLM API ("OpenAI, Anthropic Claude, or any hosted LLM API") and for documenting which model was used and why. This project uses a **hosted LLM API from Groq**.
+
+| | |
+|---|---|
+| **Provider** | Groq |
+| **Model** | Qwen3.8-27B (`qwen/qwen3.8-27b`) |
+| **API** | Groq hosted inference API – OpenAI-compatible `chat/completions` endpoint (`https://api.groq.com/openai/v1`), called from `src/llm/groq_client.py` |
+| **Selected by** | `LLM_PROVIDER=groq` and `GROQ_MODEL=qwen/qwen3.8-27b` (both are the defaults) |
+
+### Why Groq and Qwen3.8-27B
+This was a practical engineering trade-off between model capability, inference accessibility, development cost and the application's multi-call architecture:
+- **Free-tier access.** Groq offered free-tier API access, which made it practical to develop, test and iterate on this project without additional API costs.
+- **Several LLM calls per question.** The pipeline is multi-stage. A typical question uses 3 LLM calls (query rewrite, context grading, answer); a question that needs decomposition and a corrective retry can use up to 6. Free-tier accessibility was therefore an important practical consideration during development and testing.
+- **Straightforward, fast hosted inference.** Groq provides a simple OpenAI-compatible HTTP API with a JSON output mode and fast inference, which suits an interactive RAG workflow. In the live runs recorded for this project (`transcripts/sample_run.md`, `logs/llm_calls.jsonl`) individual calls completed in roughly 0.1–0.5 s; this is an observation from a handful of calls, not a benchmark.
+- **Suitable capability.** Qwen3.8-27B is an instruction-following, reasoning-capable model suited to the LLM's roles in this pipeline: query transformation, context evaluation and grounded answer generation. In the recorded live runs it returned parseable structured output for every stage that was exercised (rewrite, decomposition, grading, corrective query, answer and abstention).
+
+**Alternatives.** OpenAI GPT models and Anthropic Claude models were viable alternatives for this assignment. Groq with Qwen was selected because it provided a practical free-tier development option and suitable hosted inference. This was a practical selection – **not** a claim that Qwen outperforms GPT or Claude – and no comparison between these models was run; model quality was not benchmarked in this project. The pipeline depends only on the `LLMProvider` interface (`src/llm/provider.py`), so another hosted provider can be added by implementing it. A Gemini provider is included as an optional alternative (`LLM_PROVIDER=gemini`); see *Verification status* for what was and was not verified.
+
+### What the LLM does – and does not do
+The LLM is used for six responsibilities. Every call goes through one traced client and is logged with its call type.
+
+| # | Responsibility | Call type |
+|---|---|---|
+| 1 | Query rewriting / transformation (resolves follow-ups using the bounded session window) | `query_rewrite` |
+| 2 | Query decomposition for complex, multi-part questions (only when the rewrite step flags it) | `query_decomposition` |
+| 3 | Retrieval context grading (is the retrieved evidence sufficient to answer?) | `context_grading` |
+| 4 | Corrective retrieval: writes a better search query when the evidence is insufficient (bounded retry) | `corrective_query_generation` |
+| 5 | Grounded answer generation with source citations | `answer_generation` |
+| 6 | Abstention message when the knowledge base lacks sufficient evidence | `answer_generation` (abstention prompt) |
+
+An optional `evaluation_judging` call exists for the LLM judge in the evaluation harness; it only runs when enabled.
+
+**The LLM is not responsible for retrieval.** These are separate, local components: embeddings (`all-MiniLM-L6-v2`), **FAISS vector retrieval**, **BM25 keyword retrieval**, **Reciprocal Rank Fusion (RRF)** and **cross-encoder reranking**. Document chunking, citation validation (deterministic code that checks every citation against the chunks actually retrieved) and session storage are also plain code.
+
+### Model configuration and reproducibility
+Configuration example (placeholder value only):
+```
+LLM_PROVIDER=groq
+GROQ_MODEL=qwen/qwen3.8-27b
+GROQ_API_KEY=your_groq_api_key_here
+```
+- The API key is supplied **only through environment variables**; the code reads configuration with `os.getenv` (plus `python-dotenv` for a local, git-ignored `.env` file) and never reads secrets from committed files.
+- **Local development:** copy `.env.example` to `.env` and fill in the key. `.env` is git-ignored.
+- **Streamlit Community Cloud:** enter the same values in the app's **Secrets** settings as top-level keys (`GROQ_API_KEY = "…"`). Streamlit exposes top-level secrets as environment variables, which is how this app reads them. See *Deployment*.
+- Real credentials must never be committed. `.env.example` contains placeholders only, and API keys are scrubbed from the JSONL traces.
+- Reproducibility: the retrieval stack is deterministic; hosted-LLM output is not bit-for-bit reproducible, so stages use low temperatures (0.0–0.3). Model availability differs per account (for the key used in development, `llama-3.3-70b-versatile` returned 404 while `qwen/qwen3.8-27b` was available), so check your account's model list if a model id is rejected.
+
+## Tech stack
+| Layer | Technology |
+|---|---|
+| UI | Streamlit |
+| LLM (default) | Groq hosted inference API, Qwen3.8-27B (HTTP via `httpx`) |
+| LLM (optional) | Google Gemini via `google-genai` |
+| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (local) |
+| Vector search | FAISS (exact inner-product index) |
+| Keyword search | `rank-bm25` |
+| Reranking | `cross-encoder/ms-marco-MiniLM-L-6-v2` (local) |
+| Documents | PDF (`pypdf`), TXT, Markdown |
+| Data validation / config | Pydantic, `python-dotenv` |
+| Tests | `pytest` (offline; LLM calls mocked) |
+
+Python 3.11+ (developed on 3.12).
+
 ## Design decisions
 - **Why hybrid retrieval**: dense search captures meaning but blurs exact terms (acronyms, ids); BM25 is the opposite. Running both raises recall.
 - **Why RRF**: cosine scores and BM25 scores are on different scales; RRF uses only ranks, needs no tuning or training, and rewards chunks found by both retrievers.
@@ -62,7 +126,7 @@ flowchart TD
 - **Memory**: one JSON file per session (`data/sessions/`), unique ids, isolated per browser session via `st.session_state`; a bounded window is used for follow-ups; history is never treated as evidence.
 - **Embeddings**: `sentence-transformers/all-MiniLM-L6-v2`, local – no extra key or quota, reproducible, 384-d, good for small English corpora. The model id is stored in the index metadata and a mismatch forces a rebuild.
 - **Reranker**: `cross-encoder/ms-marco-MiniLM-L-6-v2`, local, small and strong on passage ranking.
-- **LLM provider choice**: the provider is an interface (`LLMProvider`), so the pipeline is provider-independent. **Groq with `qwen/qwen3.8-27b` is the default** because it is the provider that was verified live end to end during development. During testing with the project's Gemini key, `gemini-2.5-flash` returned 404 (not available to that key/project), while `gemini-3.6-flash` and `gemini-3.8-flash` intermittently returned 503 "high demand" / 504, so a full live Gemini run was never completed. Gemini remains fully implemented as an optional provider (`LLM_PROVIDER=gemini`). Model availability and free-tier quotas depend on each API account.
+- **LLM provider choice**: Groq with `qwen/qwen3.8-27b` is the default; the rationale is in [LLM Provider and Model Selection](#llm-provider-and-model-selection). The provider is an interface (`LLMProvider`), so the pipeline is provider-independent; Gemini remains an optional provider.
 - **Prompts** live in `src/rag/prompts.py`, each with a role, JSON output schema and anti-hallucination rules (query rewrite, decomposition, context grading, corrective query, grounded answer, abstention, evaluation judge); every model output is parsed defensively with safe fallbacks.
 - **Observability**: all calls pass through `TracedLLM` (`src/llm/provider.py`), which writes one JSONL record per call to `logs/llm_calls.jsonl`: id, timestamp, model, call type, prompt, response, tokens, latency, status, error, session, and diagnostics. Token counts are provider-reported `usage`; when absent they are estimated (~4 chars/token) and flagged `tokens_estimated: true`. Transient 5xx/network errors get bounded exponential backoff; 429s, auth and 404 errors are never retried. Hidden SDK retries are disabled so every HTTP request is accounted for. API keys are scrubbed from logs.
 
@@ -105,8 +169,8 @@ Offline retrieval, 14 questions, K=5, 53 chunks (**local, 0 LLM calls**; run wit
 | Gemini provider | Implemented; **not verified end to end live** (404 / intermittent 503, 504) | failures recorded in logs |
 | Full live evaluation, LLM judge | **Not run** | – |
 | Real 429 quota handling | Mocked only | `tests/test_groq_provider.py`, `tests/test_observability.py` |
-| Streamlit UI | Loaded and navigated in Dark, Light, Auto; a live chat turn through the UI was **not** exercised | manual |
-| PDF ingestion with text | Corrupt/blank PDFs tested; a real text PDF was not tested | `tests/test_ingestion.py` |
+| Streamlit UI | All six pages covered by automated AppTest (mocked LLM); visual appearance of the themes and a live chat turn through the UI are **not** covered by automated tests | `tests/test_streamlit_pages.py` |
+| PDF ingestion | Text PDFs built for the tests (multi-page, page numbers, Latin-1 characters) and blank/corrupt/truncated PDFs tested with real `pypdf` extraction; PDFs from word processors/scanners were **not** tested | `tests/test_ingestion_real.py` |
 | Screenshots | Not committed | – |
 
 ## Project structure
@@ -171,6 +235,13 @@ If a call ends with the length limit before producing text, the error says so an
 ### Failure diagnostics
 Calls in `logs/llm_calls.jsonl` carry a `diagnostics` object: HTTP status, provider error status/message/details, an allow-listed set of response headers (e.g. `x-request-id`, `x-goog-request-id`, `retry-after`, `x-ratelimit-*`), the finish reason and thinking-token count. API keys, cookies and auth headers are never copied, and prompt text is never placed in diagnostics. The Observability page shows it per call. A 503 `UNAVAILABLE` ("high demand") is provider-side capacity, distinct from a 429 quota error or a 401/403 key problem.
 
+## Deployment
+The application is deployed on **Streamlit Community Cloud**, which hosts the app directly from this GitHub repository (entry point `app.py`, dependencies from `requirements.txt`). The local setup above is unchanged by that.
+- **Secrets:** the Groq API key and model settings are configured in the Streamlit Community Cloud *Secrets* settings (see *Model configuration and reproducibility*). They are never stored in the repository.
+- **First launch:** the local models are downloaded and the bundled sample corpus in `data/documents/` is indexed automatically.
+- **Runtime state:** the FAISS index, session files and LLM call logs are generated at runtime on the host's local disk, are git-ignored, and should not be assumed to persist across restarts.
+- **Shared deployment caveats:** there is no authentication. Sessions are separate per browser session, but the LLM call log (shown on the Observability page, including prompts and responses) and the API quota are shared by everyone using the same deployment.
+
 ## Sample questions
 - What is the default value of k in Reciprocal Rank Fusion?
 - Explain how hybrid retrieval and reranking work together, and why both are needed.
@@ -191,7 +262,8 @@ No screenshots are committed. Launch the app and switch Appearance (Auto / Dark 
 - Reasoning models spend hidden tokens within the output cap; caps are configurable, and a length-limited empty response is reported with a hint.
 - Free-tier limits (e.g. 8,000 tokens/minute on the tested Groq model) can throttle evaluation; a question uses 3-6 LLM calls (~1,000-token grading prompts).
 - Scanned PDFs (no text layer) are rejected; no OCR.
-- Exact (flat) FAISS index; BM25 is rebuilt in memory on load. No authentication (local single-user app).
+- Exact (flat) FAISS index; BM25 is rebuilt in memory on load.
+- No authentication or per-user isolation of traces or quota: the call log and API quota are shared by everyone using the same deployment (see *Deployment*).
 
 ## Future improvements
 Chunk-level gold labels and a larger corpus, a live full-dataset evaluation with the judge, streaming answers, semantic chunking, async LLM calls, claim-level faithfulness checks on every answer, optional web-search fallback for corrective RAG, approximate FAISS indexes for large corpora, committed screenshots.
